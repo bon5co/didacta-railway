@@ -21,12 +21,12 @@ export WEB_PUBLIC_ALLOWED_HOSTS="${WEB_PUBLIC_ALLOWED_HOSTS:-$RAILWAY_PUBLIC_DOM
   until curl -fsS -o /dev/null "$API/healthz" 2>/dev/null; do
     n=$((n+1)); [ "$n" -le 400 ] || { echo "[railway-boot] API never answered, setup skipped" >&2; exit 0; }; sleep 3
   done
-  if curl -fsS "$API/setup/status" 2>/dev/null | grep -q '"initialized":true'; then
+  if curl -fsS "$API/api/v1/setup/status" 2>/dev/null | grep -q '"initialized":true'; then
     echo "[railway-boot] instance already initialised"; exit 0
   fi
   body=$(printf '{"organization":{"name":"%s","slug":"%s","primaryHostname":"%s"},"admin":{"name":"Administrator","email":"%s","password":"%s"}}' \
     "${ORG_NAME:-Didacta}" "${ORG_SLUG:-didacta}" "$RAILWAY_PUBLIC_DOMAIN" "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
-  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/setup/init" -H 'content-type: application/json' \
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/setup/init" -H 'content-type: application/json' \
     -H "x-setup-token: $DIDACTA_SETUP_TOKEN" -H "x-forwarded-host: $RAILWAY_PUBLIC_DOMAIN" --data "$body" || true)
   echo "[railway-boot] setup/init answered $code"
 ) &
