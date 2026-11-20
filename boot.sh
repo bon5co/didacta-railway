@@ -31,4 +31,20 @@ export WEB_PUBLIC_ALLOWED_HOSTS="${WEB_PUBLIC_ALLOWED_HOSTS:-$RAILWAY_PUBLIC_DOM
   echo "[railway-boot] setup/init answered $code"
 ) &
 
+# A deploy killed while `prisma migrate deploy` is running (the generate pipeline's volume attach and domain create each redeploy,
+# and so does any OOM kill or restart) leaves a _prisma_migrations row that started and never finished. Prisma then refuses every
+# later boot with P3009. Postgres runs a migration file as one implicit transaction, so the killed one changed nothing: drop the
+# unfinished rows and let the stock entrypoint apply them again. Finished and rolled-back rows are never touched.
+(
+  url="${ADMIN_DATABASE_URL%%\?*}"
+  for _ in $(seq 1 60); do
+    if out=$(psql "$url" -v ON_ERROR_STOP=1 -tAc "DELETE FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL" 2>&1); then
+      [ -n "$out" ] && echo "[railway-boot] cleared unfinished migration rows: $out"
+      break
+    fi
+    case "$out" in *'does not exist'*) break ;; esac
+    sleep 2
+  done
+)
+
 exec /sbin/tini -- /usr/local/bin/entrypoint.sh "$@"
