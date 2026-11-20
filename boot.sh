@@ -32,14 +32,24 @@ export WEB_PUBLIC_ALLOWED_HOSTS="${WEB_PUBLIC_ALLOWED_HOSTS:-$RAILWAY_PUBLIC_DOM
 ) &
 
 # A deploy killed while `prisma migrate deploy` is running (the generate pipeline's volume attach and domain create each redeploy,
-# and so does any OOM kill or restart) leaves a _prisma_migrations row that started and never finished. Prisma then refuses every
-# later boot with P3009. Postgres runs a migration file as one implicit transaction, so the killed one changed nothing: drop the
-# unfinished rows and let the stock entrypoint apply them again. Finished and rolled-back rows are never touched.
+# and so does any OOM kill or restart) leaves a _prisma_migrations row that started and never finished, plus whatever objects the
+# killed migration had already created ("type TenantStatus already exists"). Prisma then refuses every later boot (P3009 / P3018).
+# Measured on Railway 2026-11-21: deleting only the unfinished row is not enough, the baseline migration is not atomic.
+# If NO migration has ever finished, the database holds nothing but that partial baseline and no user data (the app has never
+# started), so the public schema is reset and the stock entrypoint applies everything again. If some migrations did finish, a
+# later one was killed: that is left alone, because dropping anything there could cost real data.
 (
   url="${ADMIN_DATABASE_URL%%\?*}"
+  q() { psql "$url" -v ON_ERROR_STOP=1 -tAc "$1" 2>&1; }
   for _ in $(seq 1 60); do
-    if out=$(psql "$url" -v ON_ERROR_STOP=1 -tAc "DELETE FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL" 2>&1); then
-      [ -n "$out" ] && echo "[railway-boot] cleared unfinished migration rows: $out"
+    if out=$(q "SELECT count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL) || ' ' || count(*) FILTER (WHERE finished_at IS NOT NULL) FROM _prisma_migrations"); then
+      set -- $out
+      if [ "${1:-0}" -gt 0 ] && [ "${2:-0}" -eq 0 ]; then
+        q "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO PUBLIC" >/dev/null \
+          && echo "[railway-boot] first migration never finished: reset the empty public schema for a clean retry"
+      elif [ "${1:-0}" -gt 0 ]; then
+        echo "[railway-boot] a later migration was killed mid-run; not touching a database that holds finished migrations"
+      fi
       break
     fi
     case "$out" in *'does not exist'*) break ;; esac
